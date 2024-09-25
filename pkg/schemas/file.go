@@ -2,11 +2,13 @@ package schemas
 
 import (
 	"time"
+
+	"gorm.io/datatypes"
 )
 
 type Part struct {
 	ID   int64  `json:"id"`
-	Salt string `json:"salt"`
+	Salt string `json:"salt,omitempty"`
 }
 
 type FileQuery struct {
@@ -16,7 +18,7 @@ type FileQuery struct {
 	Path       string `form:"path"`
 	Op         string `form:"op"`
 	DeepSearch bool   `form:"deepSearch"`
-	Starred    *bool  `form:"starred"`
+	Shared     *bool  `form:"shared"`
 	ParentID   string `form:"parentId"`
 	Category   string `form:"category"`
 	UpdatedAt  string `form:"updatedAt"`
@@ -46,7 +48,6 @@ type FileOut struct {
 	Category   string    `json:"category,omitempty"`
 	Encrypted  bool      `json:"encrypted"`
 	Size       int64     `json:"size,omitempty"`
-	Starred    bool      `json:"starred"`
 	ParentID   string    `json:"parentId,omitempty"`
 	ParentPath string    `json:"parentPath,omitempty"`
 	UpdatedAt  time.Time `json:"updatedAt,omitempty"`
@@ -55,13 +56,13 @@ type FileOut struct {
 
 type FileOutFull struct {
 	*FileOut
-	Parts     []Part `json:"parts,omitempty"`
-	ChannelID int64  `json:"channelId,omitempty"`
+	Parts     datatypes.JSONSlice[Part] `json:"parts,omitempty"`
+	ChannelID *int64                    `json:"channelId,omitempty"`
+	Path      string                    `json:"path,omitempty"`
 }
 
 type FileUpdate struct {
 	Name      string    `json:"name,omitempty"`
-	Starred   *bool     `json:"starred,omitempty"`
 	UpdatedAt time.Time `json:"updatedAt,omitempty"`
 	Parts     []Part    `json:"parts,omitempty"`
 	Size      *int64    `json:"size,omitempty"`
@@ -111,4 +112,28 @@ type FileCategoryStats struct {
 	TotalFiles int    `json:"totalFiles"`
 	TotalSize  int    `json:"totalSize"`
 	Category   string `json:"category"`
+}
+
+type FileShareIn struct {
+	Password  string     `json:"password,omitempty"`
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+}
+
+type FileShareOut struct {
+	ID        string     `json:"id,omitempty"`
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+	Protected bool       `json:"protected"`
+	UserID    int64      `json:"userId,omitempty"`
+	Type      string     `json:"type"`
+	Name      string     `json:"name"`
+}
+
+type FileShare struct {
+	Password  *string
+	ExpiresAt *time.Time
+	Type      string
+	FileID    string
+	UserID    int64
+	Path      string
+	Name      string
 }

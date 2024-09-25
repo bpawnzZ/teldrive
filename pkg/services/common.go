@@ -5,15 +5,15 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/divyam234/teldrive/internal/cache"
-	"github.com/divyam234/teldrive/internal/crypt"
-	"github.com/divyam234/teldrive/internal/tgc"
-	"github.com/divyam234/teldrive/pkg/models"
-	"github.com/divyam234/teldrive/pkg/schemas"
-	"github.com/divyam234/teldrive/pkg/types"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 	"github.com/pkg/errors"
+	"github.com/tgdrive/teldrive/internal/cache"
+	"github.com/tgdrive/teldrive/internal/crypt"
+	"github.com/tgdrive/teldrive/internal/tgc"
+	"github.com/tgdrive/teldrive/pkg/models"
+	"github.com/tgdrive/teldrive/pkg/schemas"
+	"github.com/tgdrive/teldrive/pkg/types"
 	"gorm.io/gorm"
 )
 
@@ -33,7 +33,7 @@ func getParts(ctx context.Context, client *telegram.Client, cache cache.Cacher, 
 	for _, part := range file.Parts {
 		ids = append(ids, int(part.ID))
 	}
-	messages, err := tgc.GetMessages(ctx, client.API(), ids, file.ChannelID)
+	messages, err := tgc.GetMessages(ctx, client.API(), ids, *file.ChannelID)
 
 	if err != nil {
 		return nil, err

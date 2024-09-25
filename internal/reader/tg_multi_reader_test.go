@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/divyam234/teldrive/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
+	"github.com/tgdrive/teldrive/internal/config"
 )
 
 type testChunkSource struct {
@@ -46,7 +46,6 @@ type TestSuite struct {
 
 func (suite *TestSuite) SetupTest() {
 	suite.config = &config.TGConfig{Stream: struct {
-		BotsLimit    int
 		MultiThreads int
 		Buffers      int
 		ChunkTimeout time.Duration

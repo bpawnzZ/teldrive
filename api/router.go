@@ -1,12 +1,12 @@
 package api
 
 import (
-	"github.com/divyam234/teldrive/internal/cache"
-	"github.com/divyam234/teldrive/internal/config"
-	"github.com/divyam234/teldrive/internal/middleware"
-	"github.com/divyam234/teldrive/pkg/controller"
-	"github.com/divyam234/teldrive/ui"
 	"github.com/gin-gonic/gin"
+	"github.com/tgdrive/teldrive/internal/cache"
+	"github.com/tgdrive/teldrive/internal/config"
+	"github.com/tgdrive/teldrive/internal/middleware"
+	"github.com/tgdrive/teldrive/pkg/controller"
+	"github.com/tgdrive/teldrive/ui"
 	"gorm.io/gorm"
 )
 
@@ -33,6 +33,10 @@ func InitRouter(r *gin.Engine, c *controller.Controller, cnf *config.Config, db 
 			files.HEAD(":fileID/download/:fileName", c.GetFileDownload)
 			files.GET(":fileID/download/:fileName", c.GetFileDownload)
 			files.PUT(":fileID/parts", authmiddleware, c.UpdateParts)
+			files.POST(":fileID/share", authmiddleware, c.CreateShare)
+			files.GET(":fileID/share", authmiddleware, c.GetShareByFileId)
+			files.PATCH(":fileID/share", authmiddleware, c.EditShare)
+			files.DELETE(":fileID/share", authmiddleware, c.DeleteShare)
 			files.GET("/category/stats", authmiddleware, c.GetCategoryStats)
 			files.POST("/move", authmiddleware, c.MoveFiles)
 			files.POST("/directories", authmiddleware, c.MakeDirectory)
@@ -44,9 +48,9 @@ func InitRouter(r *gin.Engine, c *controller.Controller, cnf *config.Config, db 
 		{
 			uploads.Use(authmiddleware)
 			uploads.GET("/stats", c.UploadStats)
-			uploads.GET(":id", c.GetUploadFileById)
-			uploads.POST(":id", c.UploadFile)
-			uploads.DELETE(":id", c.DeleteUploadFile)
+			uploads.GET("/:id", c.GetUploadFileById)
+			uploads.POST("/:id", c.UploadFile)
+			uploads.DELETE("/:id", c.DeleteUploadFile)
 		}
 		users := api.Group("/users")
 		{
@@ -59,6 +63,14 @@ func InitRouter(r *gin.Engine, c *controller.Controller, cnf *config.Config, db 
 			users.POST("/bots", c.AddBots)
 			users.DELETE("/bots", c.RemoveBots)
 			users.DELETE("/sessions/:id", c.RemoveSession)
+		}
+		share := api.Group("/share")
+		{
+			share.GET("/:shareID", c.GetShareById)
+			share.GET("/:shareID/files", c.ListShareFiles)
+			share.GET("/:shareID/files/:fileID/stream/:fileName", c.StreamSharedFile)
+			share.GET("/:shareID/files/:fileID/download/:fileName", c.StreamSharedFile)
+			share.POST("/:shareID/unlock", c.ShareUnlock)
 		}
 	}
 

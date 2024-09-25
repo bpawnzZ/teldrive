@@ -16,25 +16,26 @@ import (
 	"time"
 
 	"github.com/WinterYukky/gorm-extra-clause-plugin/exclause"
-	"github.com/divyam234/teldrive/internal/auth"
-	"github.com/divyam234/teldrive/internal/cache"
-	"github.com/divyam234/teldrive/internal/category"
-	"github.com/divyam234/teldrive/internal/config"
-	"github.com/divyam234/teldrive/internal/database"
-	"github.com/divyam234/teldrive/internal/http_range"
-	"github.com/divyam234/teldrive/internal/kv"
-	"github.com/divyam234/teldrive/internal/md5"
-	"github.com/divyam234/teldrive/internal/reader"
-	"github.com/divyam234/teldrive/internal/tgc"
-	"github.com/divyam234/teldrive/internal/utils"
-	"github.com/divyam234/teldrive/pkg/mapper"
-	"github.com/divyam234/teldrive/pkg/models"
-	"github.com/divyam234/teldrive/pkg/schemas"
-	"github.com/divyam234/teldrive/pkg/types"
 	"github.com/gin-gonic/gin"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
+	"github.com/tgdrive/teldrive/internal/auth"
+	"github.com/tgdrive/teldrive/internal/cache"
+	"github.com/tgdrive/teldrive/internal/category"
+	"github.com/tgdrive/teldrive/internal/config"
+	"github.com/tgdrive/teldrive/internal/database"
+	"github.com/tgdrive/teldrive/internal/http_range"
+	"github.com/tgdrive/teldrive/internal/kv"
+	"github.com/tgdrive/teldrive/internal/md5"
+	"github.com/tgdrive/teldrive/internal/reader"
+	"github.com/tgdrive/teldrive/internal/tgc"
+	"github.com/tgdrive/teldrive/internal/utils"
+	"github.com/tgdrive/teldrive/pkg/mapper"
+	"github.com/tgdrive/teldrive/pkg/models"
+	"github.com/tgdrive/teldrive/pkg/schemas"
+	"github.com/tgdrive/teldrive/pkg/types"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/bcrypt"
 
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -79,7 +80,6 @@ func randInt64() (int64, error) {
 type FileService struct {
 	db        *gorm.DB
 	cnf       *config.Config
-	worker    *tgc.StreamWorker
 	botWorker *tgc.BotWorker
 	cache     cache.Cacher
 	kv        kv.KV
@@ -94,7 +94,7 @@ func NewFileService(
 	kv kv.KV,
 	cache cache.Cacher,
 	logger *zap.SugaredLogger) *FileService {
-	return &FileService{db: db, cnf: cnf, worker: worker, botWorker: botWorker, cache: cache, kv: kv, logger: logger}
+	return &FileService{db: db, cnf: cnf, botWorker: botWorker, cache: cache, kv: kv, logger: logger}
 }
 
 func (fs *FileService) CreateFile(c *gin.Context, userId int64, fileIn *schemas.FileIn) (*schemas.FileOut, *types.AppError) {
@@ -142,7 +142,6 @@ func (fs *FileService) CreateFile(c *gin.Context, userId int64, fileIn *schemas.
 		fileDB.MimeType = fileIn.MimeType
 		fileDB.Category = string(category.GetCategory(fileIn.Name))
 		fileDB.Parts = datatypes.NewJSONSlice(fileIn.Parts)
-		fileDB.Starred = false
 		fileDB.Size = &fileIn.Size
 	}
 	fileDB.Name = fileIn.Name
@@ -175,10 +174,6 @@ func (fs *FileService) UpdateFile(id string, userId int64, update *schemas.FileU
 		Size:      update.Size,
 	}
 
-	if update.Starred != nil {
-		updateDb.Starred = *update.Starred
-	}
-
 	if len(update.Parts) > 0 {
 		updateDb.Parts = datatypes.NewJSONSlice(update.Parts)
 	}
@@ -198,15 +193,16 @@ func (fs *FileService) UpdateFile(id string, userId int64, update *schemas.FileU
 }
 
 func (fs *FileService) GetFileByID(id string) (*schemas.FileOutFull, *types.AppError) {
-	var file models.File
-	if err := fs.db.Where("id = ?", id).First(&file).Error; err != nil {
-		if database.IsRecordNotFoundErr(err) {
-			return nil, &types.AppError{Error: database.ErrNotFound, Code: http.StatusNotFound}
-		}
+	var result []schemas.FileOutFull
+	if err := fs.db.Model(&models.File{}).Select("*", "(select get_path_from_file_id as path from teldrive.get_path_from_file_id(id))").
+		Where("id = ?", id).Scan(&result).Error; err != nil {
 		return nil, &types.AppError{Error: err}
 	}
+	if len(result) == 0 {
+		return nil, &types.AppError{Error: database.ErrNotFound, Code: http.StatusNotFound}
+	}
 
-	return mapper.ToFileOutFull(file), nil
+	return &result[0], nil
 }
 
 func (fs *FileService) ListFiles(userId int64, fquery *schemas.FileQuery) (*schemas.FileResponse, *types.AppError) {
@@ -252,7 +248,7 @@ func (fs *FileService) ListFiles(userId int64, fquery *schemas.FileQuery) (*sche
 		}
 
 		if fquery.Query != "" {
-			query = query.Where("name &@~ REGEXP_REPLACE(?, '[.,-_]', ' ', 'g')", fquery.Query)
+			query = query.Where("name &@~ REGEXP_REPLACE(?, '[.,-_]', ' ', 'g')", strings.ToLower(fquery.Query))
 		}
 
 		if fquery.Category != "" {
@@ -287,8 +283,9 @@ func (fs *FileService) ListFiles(userId int64, fquery *schemas.FileQuery) (*sche
 		if fquery.Type != "" {
 			query.Where("type = ?", fquery.Type)
 		}
-		if fquery.Starred != nil {
-			query.Where("starred = ?", *fquery.Starred)
+
+		if fquery.Shared != nil && *fquery.Shared {
+			query.Where("id in (SELECT file_id FROM teldrive.file_shares where user_id = ?)", userId)
 		}
 	}
 
@@ -412,6 +409,85 @@ func (fs *FileService) DeleteFiles(userId int64, payload *schemas.DeleteOperatio
 	return &schemas.Message{Message: "files deleted"}, nil
 }
 
+func (fs *FileService) CreateShare(fileId string, userId int64, payload *schemas.FileShareIn) *types.AppError {
+
+	var fileShare models.FileShare
+
+	if payload.Password != "" {
+		bytes, err := bcrypt.GenerateFromPassword([]byte(payload.Password), bcrypt.MinCost)
+		if err != nil {
+			return &types.AppError{Error: err}
+		}
+		fileShare.Password = utils.StringPointer(string(bytes))
+	}
+
+	fileShare.FileID = fileId
+	fileShare.ExpiresAt = payload.ExpiresAt
+	fileShare.UserID = userId
+
+	if err := fs.db.Create(&fileShare).Error; err != nil {
+		return &types.AppError{Error: err}
+	}
+
+	return nil
+}
+
+func (fs *FileService) UpdateShare(fileId string, userId int64, payload *schemas.FileShareIn) *types.AppError {
+
+	var fileShareUpdate models.FileShare
+
+	if payload.Password != "" {
+		bytes, err := bcrypt.GenerateFromPassword([]byte(payload.Password), bcrypt.MinCost)
+		if err != nil {
+			return &types.AppError{Error: err}
+		}
+		fileShareUpdate.Password = utils.StringPointer(string(bytes))
+	}
+
+	fileShareUpdate.ExpiresAt = payload.ExpiresAt
+
+	if err := fs.db.Model(&models.FileShare{}).Where("file_id = ?", fileId).Where("user_id = ?", userId).
+		Updates(fileShareUpdate).Error; err != nil {
+		return &types.AppError{Error: err}
+	}
+
+	return nil
+}
+
+func (fs *FileService) GetShareByFileId(fileId string, userId int64) (*schemas.FileShareOut, *types.AppError) {
+
+	var result []models.FileShare
+
+	if err := fs.db.Model(&models.FileShare{}).Where("file_id = ?", fileId).Where("user_id = ?", userId).
+		Find(&result).Error; err != nil {
+		return nil, &types.AppError{Error: err}
+	}
+
+	if len(result) == 0 {
+		return nil, nil
+	}
+
+	res := &schemas.FileShareOut{ID: result[0].ID, ExpiresAt: result[0].ExpiresAt, Protected: result[0].Password != nil}
+
+	return res, nil
+}
+
+func (fs *FileService) DeleteShare(fileId string, userId int64) *types.AppError {
+
+	var deletedShare models.FileShare
+
+	if err := fs.db.Clauses(clause.Returning{}).Where("file_id = ?", fileId).Where("user_id = ?", userId).
+		Delete(&deletedShare).Error; err != nil {
+		return &types.AppError{Error: err}
+	}
+
+	if deletedShare.ID != "" {
+		fs.cache.Delete(fmt.Sprintf("shares:%s", deletedShare.ID))
+	}
+
+	return nil
+}
+
 func (fs *FileService) UpdateParts(c *gin.Context, id string, userId int64, payload *schemas.PartUpdate) (*schemas.Message, *types.AppError) {
 
 	var file models.File
@@ -464,6 +540,7 @@ func (fs *FileService) UpdateParts(c *gin.Context, id string, userId int64, payl
 		fs.cache.Delete(keys...)
 
 	}
+	fs.cache.Delete(fmt.Sprintf("files:%s", id))
 
 	return &schemas.Message{Message: "file updated"}, nil
 }
@@ -524,7 +601,7 @@ func (fs *FileService) CopyFile(c *gin.Context) (*schemas.FileOut, *types.AppErr
 		for _, part := range file.Parts {
 			ids = append(ids, int(part.ID))
 		}
-		messages, err := tgc.GetMessages(c, client.API(), ids, file.ChannelID)
+		messages, err := tgc.GetMessages(c, client.API(), ids, *file.ChannelID)
 
 		if err != nil {
 			return err
@@ -591,7 +668,6 @@ func (fs *FileService) CopyFile(c *gin.Context) (*schemas.FileOut, *types.AppErr
 	dbFile.MimeType = file.MimeType
 	dbFile.Parts = datatypes.NewJSONSlice(newIds)
 	dbFile.UserID = userId
-	dbFile.Starred = false
 	dbFile.Status = "active"
 	dbFile.ParentID = sql.NullString{
 		String: dest.Id,
@@ -608,15 +684,13 @@ func (fs *FileService) CopyFile(c *gin.Context) (*schemas.FileOut, *types.AppErr
 	return mapper.ToFileOut(dbFile), nil
 }
 
-func (fs *FileService) GetFileStream(c *gin.Context, download bool) {
+func (fs *FileService) GetFileStream(c *gin.Context, download bool, sharedFile *schemas.FileShareOut) {
 
 	w := c.Writer
 
 	r := c.Request
 
 	fileID := c.Param("fileID")
-
-	authHash := c.Query("hash")
 
 	var (
 		session *models.Session
@@ -625,20 +699,28 @@ func (fs *FileService) GetFileStream(c *gin.Context, download bool) {
 		user    *types.JWTClaims
 	)
 
-	if authHash == "" {
-		user, err = auth.VerifyUser(c, fs.db, fs.cache, fs.cnf.JWT.Secret)
-		if err != nil {
-			http.Error(w, "missing session or authash", http.StatusUnauthorized)
-			return
+	if sharedFile == nil {
+		authHash := c.Query("hash")
+
+		if authHash == "" {
+			user, err = auth.VerifyUser(c, fs.db, fs.cache, fs.cnf.JWT.Secret)
+			if err != nil {
+				http.Error(w, "missing session or authash", http.StatusUnauthorized)
+				return
+			}
+			userId, _ := strconv.ParseInt(user.Subject, 10, 64)
+			session = &models.Session{UserId: userId, Session: user.TgSession}
+		} else {
+			session, err = auth.GetSessionByHash(fs.db, fs.cache, authHash)
+			if err != nil {
+				http.Error(w, "invalid hash", http.StatusBadRequest)
+				return
+			}
 		}
-		userId, _ := strconv.ParseInt(user.Subject, 10, 64)
-		session = &models.Session{UserId: userId, Session: user.TgSession}
+
 	} else {
-		session, err = auth.GetSessionByHash(fs.db, fs.cache, authHash)
-		if err != nil {
-			http.Error(w, "invalid hash", http.StatusBadRequest)
-			return
-		}
+
+		session = &models.Session{UserId: sharedFile.UserID}
 	}
 
 	file := &schemas.FileOutFull{}
@@ -725,7 +807,7 @@ func (fs *FileService) GetFileStream(c *gin.Context, download bool) {
 
 	c.Header("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": file.Name}))
 
-	tokens, err := getBotsToken(fs.db, fs.cache, session.UserId, file.ChannelID)
+	tokens, err := getBotsToken(fs.db, fs.cache, session.UserId, *file.ChannelID)
 
 	if err != nil {
 		fs.handleError(fmt.Errorf("failed to get bots: %w", err), w)
@@ -749,24 +831,18 @@ func (fs *FileService) GetFileStream(c *gin.Context, download bool) {
 		}
 		multiThreads = 0
 
-	} else if fs.cnf.TG.DisableBgBots && len(tokens) > 0 {
-		fs.botWorker.Set(tokens, file.ChannelID)
-		token, _ = fs.botWorker.Next(file.ChannelID)
-		client, err = tgc.BotClient(c, fs.kv, &fs.cnf.TG, token)
-		if err != nil {
-			fs.handleError(err, w)
-		}
-		multiThreads = 0
 	} else {
-		fs.worker.Set(tokens[0:min(len(tokens), fs.cnf.TG.Stream.BotsLimit)], file.ChannelID)
-		c, err := fs.worker.Next(file.ChannelID)
+		fs.botWorker.Set(tokens, *file.ChannelID)
+
+		token, _ = fs.botWorker.Next(*file.ChannelID)
+
+		middlewares := tgc.Middlewares(&fs.cnf.TG, 5)
+		client, err = tgc.BotClient(c, fs.kv, &fs.cnf.TG, token, middlewares...)
 		if err != nil {
 			fs.handleError(err, w)
 			return
 		}
-		client = c.Tg
 	}
-
 	if download {
 		multiThreads = 0
 	}
@@ -778,11 +854,7 @@ func (fs *FileService) GetFileStream(c *gin.Context, download bool) {
 				fs.handleError(err, w)
 				return nil
 			}
-			if file.Encrypted {
-				lr, err = reader.NewDecryptedReader(c, client.API(), fs.worker, fs.cache, file, parts, start, end, &fs.cnf.TG, multiThreads)
-			} else {
-				lr, err = reader.NewLinearReader(c, client.API(), fs.worker, fs.cache, file, parts, start, end, &fs.cnf.TG, multiThreads)
-			}
+			lr, err = reader.NewLinearReader(c, client.API(), fs.cache, file, parts, start, end, &fs.cnf.TG, multiThreads)
 
 			if err != nil {
 				fs.handleError(err, w)
@@ -798,15 +870,9 @@ func (fs *FileService) GetFileStream(c *gin.Context, download bool) {
 			}
 			return nil
 		}
-		if fs.cnf.TG.DisableBgBots {
-			tgc.RunWithAuth(c, client, token, func(ctx context.Context) error {
-				return handleStream()
-			})
-		} else {
-			fs.worker.IncActiveStream()
-			defer fs.worker.DecActiveStreams()
-			handleStream()
-		}
+		tgc.RunWithAuth(c, client, token, func(ctx context.Context) error {
+			return handleStream()
+		})
 
 	}
 }

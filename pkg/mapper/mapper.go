@@ -1,8 +1,8 @@
 package mapper
 
 import (
-	"github.com/divyam234/teldrive/pkg/models"
-	"github.com/divyam234/teldrive/pkg/schemas"
+	"github.com/tgdrive/teldrive/pkg/models"
+	"github.com/tgdrive/teldrive/pkg/schemas"
 )
 
 func ToFileOut(file models.File) *schemas.FileOut {
@@ -18,7 +18,6 @@ func ToFileOut(file models.File) *schemas.FileOut {
 		Category:  file.Category,
 		Encrypted: file.Encrypted,
 		Size:      size,
-		Starred:   file.Starred,
 		ParentID:  file.ParentID.String,
 		UpdatedAt: file.UpdatedAt,
 	}
@@ -26,16 +25,10 @@ func ToFileOut(file models.File) *schemas.FileOut {
 
 func ToFileOutFull(file models.File) *schemas.FileOutFull {
 
-	var channelId int64
-
-	if file.ChannelID != nil {
-		channelId = *file.ChannelID
-	}
-
 	return &schemas.FileOutFull{
 		FileOut:   ToFileOut(file),
 		Parts:     file.Parts,
-		ChannelID: channelId,
+		ChannelID: file.ChannelID,
 	}
 }
 

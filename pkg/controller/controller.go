@@ -1,7 +1,7 @@
 package controller
 
 import (
-	"github.com/divyam234/teldrive/pkg/services"
+	"github.com/tgdrive/teldrive/pkg/services"
 )
 
 type Controller struct {
@@ -9,16 +9,19 @@ type Controller struct {
 	UserService   *services.UserService
 	UploadService *services.UploadService
 	AuthService   *services.AuthService
+	ShareService  *services.ShareService
 }
 
 func NewController(fileService *services.FileService,
 	userService *services.UserService,
 	uploadService *services.UploadService,
-	authService *services.AuthService) *Controller {
+	authService *services.AuthService,
+	shareService *services.ShareService) *Controller {
 	return &Controller{
 		FileService:   fileService,
 		UserService:   userService,
 		UploadService: uploadService,
 		AuthService:   authService,
+		ShareService:  shareService,
 	}
 }

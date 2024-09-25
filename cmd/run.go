@@ -11,19 +11,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/divyam234/teldrive/api"
-	"github.com/divyam234/teldrive/internal/cache"
-	"github.com/divyam234/teldrive/internal/config"
-	"github.com/divyam234/teldrive/internal/database"
-	"github.com/divyam234/teldrive/internal/duration"
-	"github.com/divyam234/teldrive/internal/kv"
-	"github.com/divyam234/teldrive/internal/logging"
-	"github.com/divyam234/teldrive/internal/middleware"
-	"github.com/divyam234/teldrive/internal/tgc"
-	"github.com/divyam234/teldrive/internal/utils"
-	"github.com/divyam234/teldrive/pkg/controller"
-	"github.com/divyam234/teldrive/pkg/cron"
-	"github.com/divyam234/teldrive/pkg/services"
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-contrib/pprof"
 	ginzap "github.com/gin-contrib/zap"
@@ -33,6 +20,19 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	"github.com/tgdrive/teldrive/api"
+	"github.com/tgdrive/teldrive/internal/cache"
+	"github.com/tgdrive/teldrive/internal/config"
+	"github.com/tgdrive/teldrive/internal/database"
+	"github.com/tgdrive/teldrive/internal/duration"
+	"github.com/tgdrive/teldrive/internal/kv"
+	"github.com/tgdrive/teldrive/internal/logging"
+	"github.com/tgdrive/teldrive/internal/middleware"
+	"github.com/tgdrive/teldrive/internal/tgc"
+	"github.com/tgdrive/teldrive/internal/utils"
+	"github.com/tgdrive/teldrive/pkg/controller"
+	"github.com/tgdrive/teldrive/pkg/cron"
+	"github.com/tgdrive/teldrive/pkg/services"
 	"go.uber.org/fx"
 	"go.uber.org/zap/zapcore"
 	"gorm.io/gorm"
@@ -64,9 +64,8 @@ func NewRun() *cobra.Command {
 	duration.DurationVar(runCmd.Flags(), &config.CronJobs.CleanUploadsInterval, "cronjobs-clean-uploads-interval", 12*time.Hour, "Clean uploads interval")
 	duration.DurationVar(runCmd.Flags(), &config.CronJobs.FolderSizeInterval, "cronjobs-folder-size-interval", 2*time.Hour, "Folder size update  interval")
 
-	runCmd.Flags().StringVar(&config.Cache.Type, "cache-type", "memory", "Cache type redis or memory")
 	runCmd.Flags().IntVar(&config.Cache.MaxSize, "cache-max-size", 10*1024*1024, "Max Cache max size (memory)")
-	runCmd.Flags().StringVar(&config.Cache.RedisAddr, "cache-redis-addr", "localhost:6379", "Redis address")
+	runCmd.Flags().StringVar(&config.Cache.RedisAddr, "cache-redis-addr", "", "Redis address")
 	runCmd.Flags().StringVar(&config.Cache.RedisPass, "cache-redis-pass", "", "Redis password")
 
 	runCmd.Flags().IntVarP(&config.Log.Level, "log-level", "", -1, "Logging level")
@@ -99,7 +98,6 @@ func NewRun() *cobra.Command {
 	runCmd.Flags().StringVar(&config.TG.SystemLangCode, "tg-system-lang-code", "en-US", "System language code")
 	runCmd.Flags().StringVar(&config.TG.LangPack, "tg-lang-pack", "webk", "Language pack")
 	runCmd.Flags().StringVar(&config.TG.Proxy, "tg-proxy", "", "HTTP OR SOCKS5 proxy URL")
-	runCmd.Flags().BoolVar(&config.TG.DisableBgBots, "tg-disable-bg-bots", false, "Disable Background bots")
 	runCmd.Flags().BoolVar(&config.TG.DisableStreamBots, "tg-disable-stream-bots", false, "Disable Stream bots")
 	runCmd.Flags().BoolVar(&config.TG.EnableLogging, "tg-enable-logging", false, "Enable telegram client logging")
 	runCmd.Flags().StringVar(&config.TG.Uploads.EncryptionKey, "tg-uploads-encryption-key", "", "Uploads encryption key")
@@ -111,7 +109,6 @@ func NewRun() *cobra.Command {
 	duration.DurationVar(runCmd.Flags(), &config.TG.BgBotsCheckInterval, "tg-bg-bots-check-interval", 4*time.Hour, "Interval for checking Idle background bots")
 	runCmd.Flags().IntVar(&config.TG.Stream.MultiThreads, "tg-stream-multi-threads", 0, "Stream multi-threads")
 	runCmd.Flags().IntVar(&config.TG.Stream.Buffers, "tg-stream-buffers", 8, "No of Stream buffers")
-	runCmd.Flags().IntVar(&config.TG.Stream.BotsLimit, "tg-stream-bots-limit", 5, "Stream bots limit")
 	duration.DurationVar(runCmd.Flags(), &config.TG.Stream.ChunkTimeout, "tg-stream-chunk-timeout", 20*time.Second, "Chunk Fetch Timeout")
 	runCmd.MarkFlagRequired("tg-app-id")
 	runCmd.MarkFlagRequired("tg-app-hash")
@@ -158,6 +155,7 @@ func runApplication(conf *config.Config) {
 			services.NewFileService,
 			services.NewUploadService,
 			services.NewUserService,
+			services.NewShareService,
 			controller.NewController,
 		),
 		fx.Invoke(
