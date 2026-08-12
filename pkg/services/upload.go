@@ -11,6 +11,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tgdrive/teldrive/internal/api"
@@ -135,8 +136,17 @@ func (a *apiService) uploadToTelegram(ctx context.Context, client *tg.Client, ch
 		return nil, err
 	}
 
+	timeout := a.cnf.TG.Uploads.Timeout
+	if timeout <= 0 {
+		timeout = 20 * time.Minute
+	}
+	// Derive a cancellable context so the stall watchdog can abort a single
+	// upload attempt on no progress without cancelling the parent request.
+	uploadCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	u := uploader.NewUploader(client).WithThreads(a.cnf.TG.Uploads.Threads).WithPartSize(512 * 1024)
-	upload, err := u.Upload(ctx, uploader.NewUpload(params.PartName, fileStream, fileSize))
+	upload, err := u.WithProgress(a.newStallWatchdog(uploadCtx, cancel, timeout)).Upload(uploadCtx, uploader.NewUpload(params.PartName, fileStream, fileSize))
 	if err != nil {
 		return nil, err
 	}
@@ -167,6 +177,60 @@ func (a *apiService) uploadToTelegram(ctx context.Context, client *tg.Client, ch
 		return nil, fmt.Errorf("upload failed: invalid message ID 0 from telegram")
 	}
 	return message, nil
+}
+
+// stallWatchdog implements uploader.Progress. It cancels a Telegram upload
+// that stops making progress (no part confirmed) for longer than stallTimeout.
+//
+// gotd's Upload() blocks indefinitely inside the upload thread loop when the
+// DC connection wedges without returning an error and without the context
+// firing. That starves the HTTP request body and freezes the whole pipe (the
+// observed "0 B/s, stuck send-Q" stall). By cancelling the attempt on no
+// progress, the upload surfaces a normal error so teldrive's recovery/retry
+// middleware re-establishes the connection and resumes from Telegram's
+// file-part checkpoint instead of hanging forever. A long but healthy upload
+// (which keeps confirming parts) is never interrupted.
+type stallWatchdog struct {
+	cancel       context.CancelFunc
+	stallTimeout time.Duration
+	lastMu       sync.Mutex
+	lastChunk    time.Time
+}
+
+func (w *stallWatchdog) Chunk(_ context.Context, _ uploader.ProgressState) error {
+	w.lastMu.Lock()
+	w.lastChunk = time.Now()
+	w.lastMu.Unlock()
+	return nil
+}
+
+func (a *apiService) newStallWatchdog(ctx context.Context, cancel context.CancelFunc, stallTimeout time.Duration) uploader.Progress {
+	w := &stallWatchdog{
+		cancel:       cancel,
+		stallTimeout: stallTimeout,
+		lastChunk:    time.Now(),
+	}
+	go func() {
+		t := time.NewTimer(stallTimeout)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return // upload already finished or cancelled
+			case <-t.C:
+				w.lastMu.Lock()
+				since := time.Since(w.lastChunk)
+				w.lastMu.Unlock()
+				if since < stallTimeout {
+					t.Reset(time.Duration(stallTimeout - since))
+					continue // made progress; keep watching
+				}
+				w.cancel()
+				return
+			}
+		}
+	}()
+	return w
 }
 
 func (a *apiService) UploadsUpload(ctx context.Context, req *api.UploadsUploadReqWithContentType, params api.UploadsUploadParams) (*api.UploadPart, error) {

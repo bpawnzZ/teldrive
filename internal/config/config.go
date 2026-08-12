@@ -167,6 +167,12 @@ type TGUpload struct {
 	Threads       int           `default:"8" description:"Number of upload threads"`
 	MaxRetries    int           `default:"10" description:"Maximum upload retry attempts"`
 	Retention     time.Duration `default:"7d" description:"Upload retention period"`
+	// Timeout bounds a single upload attempt to the Telegram DC. If the
+	// connection stalls (no progress, no error) beyond this duration, the
+	// attempt is cancelled so the recovery/retry middleware can re-establish
+	// the connection and resume from the Telegram part checkpoint instead of
+	// hanging the HTTP request indefinitely.
+	Timeout time.Duration `default:"20m" description:"Timeout for a single upload attempt"`
 }
 type TGConfig struct {
 	RateLimit         bool          `default:"true" description:"Enable rate limiting for API calls"`

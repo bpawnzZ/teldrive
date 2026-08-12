@@ -21,6 +21,14 @@ var internalErrors = []string{
 	"connection dead",
 	"engine was closed",
 	"STORAGE_CHOOSE_VOLUME_FAILED",
+	// Transient connection-init / pool errors. gotd surfaces these when a
+	// Telegram DC connection is (re)initializing; a part-in-flight should be
+	// retried on the re-inited connection rather than failing the whole upload.
+	"CONNECTION_NOT_INITED",
+	"CONNECTION_INITED_ONCE",
+	"CONNECTION_INIT_FAIL",
+	"CONNECTION_BW_LIMIT",
+	"NET_BW_LIMIT",
 }
 
 type retry struct {
