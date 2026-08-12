@@ -72,6 +72,21 @@ func (s *PostgresStorage) StoreSession(ctx context.Context, data []byte) error {
 	})
 }
 
+// Evict removes the bot session row from both the teldrive.kv database row
+// and the cache. This forces the next LoadSession to miss and allows a fresh
+// MTProto auth key to be minted after a bot key is permanently revoked.
+func (s *PostgresStorage) Evict(ctx context.Context) error {
+	if err := s.db.WithContext(ctx).Exec(`DELETE FROM teldrive.kv WHERE key = ?`, s.key).Error; err != nil {
+		return errors.Wrap(err, "delete session")
+	}
+	if s.cache != nil {
+		if err := s.cache.Delete(ctx, cache.Key("session", s.key)); err != nil {
+			return errors.Wrap(err, "evict session cache")
+		}
+	}
+	return nil
+}
+
 // Type returns the storage type
 func (s *PostgresStorage) Type() string {
 	return "postgres"

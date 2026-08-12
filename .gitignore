@@ -35,3 +35,8 @@ docs/dist
 teldrive-ui.zip
 internal/api
 .opencode/plans
+
+# Local tooling / spec-generation artifacts (not part of the shipped source)
+openspec
+.notes
+.opencode

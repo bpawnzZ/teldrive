@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -268,89 +269,195 @@ func (a *apiService) UploadsUpload(ctx context.Context, req *api.UploadsUploadRe
 		channelId = params.ChannelId.Value
 	}
 
-	client, token, index, channelUser, err := a.getUploadClient(ctx, userId)
+	// The request body is a single-pass stream. Spool it to a temp file so a
+	// part can be re-fed from the start when a bot's auth key is revoked and
+	// the in-flight part is retried under a freshly minted key (resuming from
+	// Telegram's file-part checkpoint). On the happy path (no revocation) the
+	// body is read exactly once, keeping behaviour identical.
+	spool, err := newSpooledReader(req.Content.Data)
 	if err != nil {
 		return nil, &apiError{err: err}
 	}
+	defer spool.Close()
 
-	logger.Debug("upload.started", zap.String("bot", channelUser), zap.Int("bot_no", index), zap.Int64("size", params.ContentLength))
+	// maxReauth attempts bound the re-auth retry: one original pass plus (at
+	// most) one re-auth retry after a permanent auth-key revocation.
+	const maxReauth = 1
 
-	uploadPool := pool.NewPool(client, int64(a.cnf.TG.PoolSize), a.newMiddlewares(ctx, a.cnf.TG.Uploads.MaxRetries)...)
-	defer func() { uploadPool.Close() }()
+	var (
+		out        api.UploadPart
+		uploadErr  error
+		reauthDone bool
+	)
 
-	var out api.UploadPart
-	// Compute BLAKE3 block hashes on plaintext BEFORE encryption
-	var blockHasher *hash.BlockHasher
-	var reader io.Reader = req.Content.Data
+	for attempt := 0; attempt <= maxReauth; attempt++ {
+		client, token, index, channelUser, err := a.getUploadClient(ctx, userId)
+		if err != nil {
+			return nil, &apiError{err: err}
+		}
 
-	if params.Hashing.Value {
-		blockHasher = hash.NewBlockHasher()
-		reader = io.TeeReader(req.Content.Data, blockHasher)
+		logger.Debug("upload.started", zap.String("bot", channelUser), zap.Int("bot_no", index), zap.Int64("size", params.ContentLength))
+
+		uploadPool := pool.NewPool(client, int64(a.cnf.TG.PoolSize), a.newMiddlewares(ctx, a.cnf.TG.Uploads.MaxRetries)...)
+
+		// Replay the spooled body from the start for this attempt.
+		if err := spool.Rewind(); err != nil {
+			uploadPool.Close()
+			return nil, &apiError{err: err}
+		}
+		// Compute BLAKE3 block hashes on plaintext BEFORE encryption. A fresh
+		// hasher per attempt avoids double-counting across a re-auth retry.
+		var blockHasher *hash.BlockHasher
+		var plaintext io.Reader = spool
+		if params.Hashing.Value {
+			blockHasher = hash.NewBlockHasher()
+			plaintext = io.TeeReader(spool, blockHasher)
+		}
+
+		err = tgc.RunWithAuth(ctx, client, token, func(ctx context.Context) error {
+
+			client := uploadPool.Default(ctx)
+
+			fileStream, fileSize, salt, err := a.prepareEncryption(&params, plaintext, params.ContentLength, logger)
+			if err != nil {
+				return err
+			}
+
+			message, err := a.uploadToTelegram(ctx, client, channelId, &params, fileStream, fileSize, logger)
+
+			if err != nil {
+				return err
+			}
+
+			doc, ok := msgDocument(message)
+
+			if !ok || (doc.Size == 0 && doc.Size != fileSize) {
+				return ErrUploadFailed
+			}
+
+			var blockHashes []byte
+			if blockHasher != nil {
+				blockHashes = blockHasher.Sum()
+			}
+
+			partUpload := &models.Upload{
+				Name:        params.PartName,
+				UploadId:    params.ID,
+				PartId:      message.ID,
+				ChannelId:   channelId,
+				Size:        fileSize,
+				PartNo:      params.PartNo,
+				UserId:      userId,
+				Encrypted:   params.Encrypted.Value,
+				Salt:        salt,
+				BlockHashes: blockHashes,
+			}
+
+			if err := a.db.Create(partUpload).Error; err != nil {
+				return err
+			}
+
+			out = api.UploadPart{
+				Name:      partUpload.Name,
+				PartId:    partUpload.PartId,
+				ChannelId: partUpload.ChannelId,
+				PartNo:    partUpload.PartNo,
+				Size:      partUpload.Size,
+				Encrypted: partUpload.Encrypted,
+			}
+			out.SetSalt(api.NewOptString(partUpload.Salt))
+			return nil
+		})
+
+		uploadPool.Close()
+
+		if err == nil {
+			uploadErr = nil
+			break
+		}
+
+		// A permanently dead bot auth key cannot be fixed by retrying the same
+		// request. On the first occurrence, evict the poisoned session and mint
+		// a fresh key, then retry the part against it (resuming from Telegram's
+		// file-part checkpoint via the spooled body).
+		if !reauthDone && tgc.IsKeyRevocationError(err) {
+			logger.Warn("upload.auth_key_revoked",
+				zap.String("bot", channelUser), zap.Int("bot_no", index), zap.Error(err))
+			if _, rerr := tgc.ReAuthBot(ctx, a.db, a.cache, &a.cnf.TG, token); rerr != nil {
+				logger.Error("upload.reauth_failed", zap.Error(rerr))
+				uploadErr = err
+				break
+			}
+			reauthDone = true
+			continue
+		}
+
+		uploadErr = err
+		break
 	}
 
-	err = tgc.RunWithAuth(ctx, client, token, func(ctx context.Context) error {
-
-		client := uploadPool.Default(ctx)
-
-		fileStream, fileSize, salt, err := a.prepareEncryption(&params, reader, params.ContentLength, logger)
-		if err != nil {
-			return err
-		}
-
-		message, err := a.uploadToTelegram(ctx, client, channelId, &params, fileStream, fileSize, logger)
-
-		if err != nil {
-			return err
-		}
-
-		doc, ok := msgDocument(message)
-
-		if !ok || (doc.Size == 0 && doc.Size != fileSize) {
-			return ErrUploadFailed
-		}
-
-		var blockHashes []byte
-		if blockHasher != nil {
-			blockHashes = blockHasher.Sum()
-		}
-
-		partUpload := &models.Upload{
-			Name:        params.PartName,
-			UploadId:    params.ID,
-			PartId:      message.ID,
-			ChannelId:   channelId,
-			Size:        fileSize,
-			PartNo:      params.PartNo,
-			UserId:      userId,
-			Encrypted:   params.Encrypted.Value,
-			Salt:        salt,
-			BlockHashes: blockHashes,
-		}
-
-		if err := a.db.Create(partUpload).Error; err != nil {
-			return err
-		}
-
-		out = api.UploadPart{
-			Name:      partUpload.Name,
-			PartId:    partUpload.PartId,
-			ChannelId: partUpload.ChannelId,
-			PartNo:    partUpload.PartNo,
-			Size:      partUpload.Size,
-			Encrypted: partUpload.Encrypted,
-		}
-		out.SetSalt(api.NewOptString(partUpload.Salt))
-		return nil
-	})
-
-	if err != nil {
+	if uploadErr != nil {
 		logger.Error("upload.failed", zap.String("file_name", params.FileName),
 			zap.String("part_name", params.PartName),
-			zap.Int("part_no", params.PartNo), zap.Error(err))
-		return nil, &apiError{err: err}
+			zap.Int("part_no", params.PartNo), zap.Error(uploadErr))
+		return nil, &apiError{err: uploadErr}
 	}
 	logger.Debug("upload.complete", zap.Int("message_id", out.PartId), zap.Int64("final_size", out.Size), zap.Bool("encrypted", out.Encrypted))
 	return &out, nil
+}
+
+// spooledReader wraps an original io.Reader, recording bytes to a temp file as
+// they are read so the same plaintext stream can be replayed for a re-auth
+// retry of an upload part whose Telegram auth key was revoked. The happy path
+// reads the source exactly once.
+type spooledReader struct {
+	file   *os.File
+	src    io.Reader
+	passes int // number of Rewind() calls; pass 1 streams from src, later passes replay the spool
+}
+
+func newSpooledReader(src io.Reader) (*spooledReader, error) {
+	f, err := os.CreateTemp("", "teldrive-upload-*")
+	if err != nil {
+		return nil, err
+	}
+	return &spooledReader{file: f, src: src}, nil
+}
+
+// Read feeds from the original source on the first pass (spooling to the temp
+// file) and from the spool on every replay pass.
+func (s *spooledReader) Read(p []byte) (int, error) {
+	if s.passes > 1 {
+		return s.file.Read(p)
+	}
+	n, err := s.src.Read(p)
+	if n > 0 {
+		if _, werr := s.file.Write(p[:n]); werr != nil {
+			return n, werr
+		}
+	}
+	return n, err
+}
+
+// Rewind is called before each upload attempt. The first call begins the
+// initial pass off the source; subsequent calls replay the spooled bytes from
+// the start so a re-auth retry can re-feed the same part.
+func (s *spooledReader) Rewind() error {
+	s.passes++
+	if s.passes > 1 {
+		if _, err := s.file.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Close removes the spooled temp file.
+func (s *spooledReader) Close() error {
+	name := s.file.Name()
+	err := s.file.Close()
+	_ = os.Remove(name)
+	return err
 }
 
 func msgDocument(m tg.MessageClass) (*tg.Document, bool) {

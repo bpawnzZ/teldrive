@@ -105,6 +105,17 @@ func (s *BoltStorage) StoreSession(ctx context.Context, data []byte) error {
 	})
 }
 
+// Evict removes the session from BoltDB so a fresh key is minted next time.
+func (s *BoltStorage) Evict(ctx context.Context) error {
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(sessionBucket)
+		if b == nil {
+			return nil
+		}
+		return b.Delete([]byte(s.key))
+	})
+}
+
 // Type returns the storage type
 func (s *BoltStorage) Type() string {
 	return "bolt"

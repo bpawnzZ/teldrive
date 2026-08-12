@@ -1,6 +1,7 @@
 package tgstorage
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/gotd/td/session"
@@ -16,6 +17,11 @@ type Storage interface {
 
 	// Type returns the storage backend type
 	Type() string
+
+	// Evict removes the stored session so a fresh key is minted on the
+	// next LoadSession. Used before re-authenticating a bot whose Telegram
+	// auth key was revoked.
+	Evict(ctx context.Context) error
 
 	// Close closes the storage backend
 	Close() error
