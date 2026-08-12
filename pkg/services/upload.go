@@ -123,7 +123,13 @@ func (a *apiService) getUploadClient(ctx context.Context, userId int64) (*telegr
 	if err != nil {
 		return nil, "", 0, "", err
 	}
-	client, err := tgc.BotClient(ctx, a.db, a.cache, &a.cnf.TG, token)
+	// Route through the shared ClientPool so each bot gets one long-lived,
+	// already-authorized client that is reused across uploads. Creating a fresh
+	// BotClient per upload part re-runs Auth() on every request, which rotates
+	// the bot's Telegram auth key and revokes the key any in-flight upload is
+	// still using (surfacing as AUTH_KEY_UNREGISTERED). Reusing a pooled client
+	// keeps the auth key stable and stops the session churn.
+	client, err := a.clientPool.GetClient(ctx, userId, token)
 	if err != nil {
 		return nil, "", 0, "", err
 	}
@@ -275,6 +281,13 @@ func (a *apiService) UploadsUpload(ctx context.Context, req *api.UploadsUploadRe
 
 	logger.Debug("upload.started", zap.String("bot", channelUser), zap.Int("bot_no", index), zap.Int64("size", params.ContentLength))
 
+	// Upload parts are sent through a pool sub-invoker (uploadPool.Default),
+	// NOT through the pooled client's API(), so the pooled client's own
+	// middleware never covers them. Apply the middleware chain here on the
+	// sub-invoker exactly as before so upload parts keep their floodwait /
+	// recovery / retry(Uploads.MaxRetries) / rate-limit protection. There is no
+	// double-application because a single request only traverses one of the
+	// sub-invoker or the client.API() path, never both.
 	uploadPool := pool.NewPool(client, int64(a.cnf.TG.PoolSize), a.newMiddlewares(ctx, a.cnf.TG.Uploads.MaxRetries)...)
 	defer func() { uploadPool.Close() }()
 
@@ -288,8 +301,7 @@ func (a *apiService) UploadsUpload(ctx context.Context, req *api.UploadsUploadRe
 		reader = io.TeeReader(req.Content.Data, blockHasher)
 	}
 
-	err = tgc.RunWithAuth(ctx, client, token, func(ctx context.Context) error {
-
+	runUpload := func(ctx context.Context) error {
 		client := uploadPool.Default(ctx)
 
 		fileStream, fileSize, salt, err := a.prepareEncryption(&params, reader, params.ContentLength, logger)
@@ -341,7 +353,18 @@ func (a *apiService) UploadsUpload(ctx context.Context, req *api.UploadsUploadRe
 		}
 		out.SetSalt(api.NewOptString(partUpload.Salt))
 		return nil
-	})
+	}
+
+	// A pooled bot client (token != "") is already running and authorized via
+	// ClientPool.GetClient, so we must NOT wrap it in RunWithAuth/client.Run()
+	// again (that would overwrite the shared client's context and cancel its
+	// lifecycle). A user-session client (token == "") is freshly created and
+	// not running, so it still needs RunWithAuth to authenticate and run.
+	if token != "" {
+		err = runUpload(ctx)
+	} else {
+		err = tgc.RunWithAuth(ctx, client, token, runUpload)
+	}
 
 	if err != nil {
 		logger.Error("upload.failed", zap.String("file_name", params.FileName),

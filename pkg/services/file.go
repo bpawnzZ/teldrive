@@ -944,7 +944,11 @@ func (e *extendedService) FilesStream(w http.ResponseWriter, r *http.Request, fi
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		client, err = tgc.BotClient(ctx, e.api.db, e.api.cache, &e.api.cnf.TG, token, e.api.newMiddlewares(ctx, 5)...)
+		// Route through the shared ClientPool so streaming reuses the same
+		// long-lived, already-authorized bot clients as uploads. Creating a
+		// fresh BotClient here churns the bot session auth key across
+		// connections (AUTH_KEY_UNREGISTERED) and defeats the pool reuse.
+		client, err = e.api.clientPool.GetClient(ctx, session.UserId, token)
 		if err != nil {
 			logger.Error("stream.bot_client_failed", zap.Error(err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -998,9 +1002,17 @@ func (e *extendedService) FilesStream(w http.ResponseWriter, r *http.Request, fi
 			return nil
 		}
 
-		tgc.RunWithAuth(ctx, client, token, func(ctx context.Context) error {
-			return handleStream()
-		})
+		// A pooled bot client (token != "") is already running and authorized
+		// via ClientPool.GetClient, so do NOT run it again (that would overwrite
+		// the shared client's context/cancel). A user-session client (token == "")
+		// is freshly created and needs RunWithAuth to authenticate and run.
+		if token != "" {
+			_ = handleStream()
+		} else {
+			tgc.RunWithAuth(ctx, client, token, func(ctx context.Context) error {
+				return handleStream()
+			})
+		}
 
 	}
 }

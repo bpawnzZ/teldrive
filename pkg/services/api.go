@@ -33,6 +33,7 @@ type apiService struct {
 	botSelector    tgc.BotSelector
 	events         events.EventBroadcaster
 	channelManager *tgc.ChannelManager
+	clientPool     *tgc.ClientPool
 }
 
 func (a *apiService) newMiddlewares(ctx context.Context, retries int) []telegram.Middleware {
@@ -184,6 +185,7 @@ func NewApiService(db *gorm.DB,
 		botSelector:    botSelector,
 		events:         events,
 		channelManager: tgc.NewChannelManager(db, cache, &cnf.TG),
+		clientPool:     tgc.NewClientPool(db, cache, &cnf.TG),
 	}
 }
 
